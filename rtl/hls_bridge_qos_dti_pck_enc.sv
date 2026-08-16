@@ -82,7 +82,7 @@ module hls_bridge_qos_dti_pck_enc #(
 
   wire [KMAX_NUM_TLPS_PER_CLK-1:0]            sop_shift;
   wire [KMAX_NUM_TLPS_PER_CLK-1:0]            eop_shift;
-  wire                                         eop_detection;
+  wire                                         leftover_eop;
   wire                                         spilled_pck;
 
   wire [KMAX_NUM_TLPS_PER_CLK:0]              pck_ended;
@@ -141,21 +141,23 @@ module hls_bridge_qos_dti_pck_enc #(
     end
   endgenerate
 
-  // EOP detection: any EOP flag set while valid
-  assign eop_detection = (|cntl_eop) & hls_rx_dti_valid;
+  // Continuation EOP: EOP with no SOP in that slot (multi-beat TLP ending).
+  // A same-cycle SOP+EOP must not retire a pending spill — that was counting
+  // a stale unused-slot SOP as a second NP&RESP (QOS_MIDTEST_ERR group 24/27).
+  assign leftover_eop  = hls_rx_dti_valid & (|(cntl_eop & ~cntl_sop));
   // Spilled packet: a shifted SOP slot has no matching EOP this cycle
   assign spilled_pck   = |(sop_shift & ~eop_shift);
 
   // Per-slot packet-ended flags (K+1 bits: K normal slots + 1 spill slot)
   assign pck_ended[KMAX_NUM_TLPS_PER_CLK-1:0] =
       hls_rx_dti_valid ? (sop_shift & eop_shift) : {KMAX_NUM_TLPS_PER_CLK{1'b0}};
-  assign pck_ended[KMAX_NUM_TLPS_PER_CLK] = spilled_pck_reg & eop_detection;
+  assign pck_ended[KMAX_NUM_TLPS_PER_CLK] = spilled_pck_reg & leftover_eop;
 
-  // Spill state: set on spill detected, cleared when the deferred EOP arrives
+  // Spill state: set on spill detected, cleared only on a continuation EOP
   always @(*) begin : process_spilled_pck_comb
     if (spilled_pck)
       spilled_pck_next = 1'b1;
-    else if (eop_detection && spilled_pck_reg)
+    else if (leftover_eop && spilled_pck_reg)
       spilled_pck_next = 1'b0;
     else
       spilled_pck_next = spilled_pck_reg;
