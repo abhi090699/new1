@@ -45,6 +45,8 @@ module hls_bridge_qos_dti_pck_enc #(
 
   //----------------------------------------------------------------------------
   // QoS counter-enable output (flattened 2D array)
+  //   Flat layout: [cnt*(K+1) +: (K+1)] = counter group 'cnt', K+1 slots
+  //   (slots 0..K-1 = normal TLP slots, slot K = legacy spill slot — unused)
   //----------------------------------------------------------------------------
   /*BSF_IF:dti_pck_enc_tx_if,core_clk,core_rst_n,ipio=0
   ,dis=Per-slot counter-group enable flat output (before transpose)
@@ -53,28 +55,22 @@ module hls_bridge_qos_dti_pck_enc #(
   //BSF_IF_END:dti_pck_enc_tx_if;
 );
 
-  reg                                          spilled_pck_next;
-  reg [2:0]                                    spilled_pck_stream_id;
-  reg [2:0]                                    dti_stream         [KMAX_NUM_TLPS_PER_CLK-1:0];
-
   reg                                          dti_valid;
-  reg                                          spilled_pck_reg;
-  reg [2:0]                                    spilled_pck_stream_id_reg;
+  reg [2:0]                                    dti_stream         [KMAX_NUM_TLPS_PER_CLK-1:0];
   reg [2:0]                                    dti_stream_reg     [KMAX_NUM_TLPS_PER_CLK:0];
   reg [METADATA_STREAM_ID_WD-1:0]              cntl_metadata_stream_id [KMAX_NUM_TLPS_PER_CLK-1:0];
-  reg [KMAX_NUM_TLPS_PER_CLK-1:0]              sop_shift_d;
+
+  reg [KMAX_NUM_TLPS_PER_CLK-1:0]              slot_armed_reg;
+  reg [METADATA_STREAM_ID_WD-1:0]              slot_stream_reg    [KMAX_NUM_TLPS_PER_CLK-1:0];
 
   reg [KMAX_NUM_TLPS_PER_CLK:0]               pck_ended_reg;
 
   reg [NUM_TLP_STREAMS_MAX-1:0]               qos_stream_en [KMAX_NUM_TLPS_PER_CLK:0];
   reg [COUNT_NUMBER-1:0]                      dti_num_en    [KMAX_NUM_TLPS_PER_CLK:0];
 
-  wire [KMAX_NUM_TLPS_PER_CLK-1:0]            sop_shift;
-  wire [KMAX_NUM_TLPS_PER_CLK-1:0]            eop_shift;
-  wire [KMAX_NUM_TLPS_PER_CLK-1:0]            sop_no_eop;
-  wire [KMAX_NUM_TLPS_PER_CLK-1:0]            new_spill_slot;
-  wire                                         spill_slot_eop;
-  wire                                         spilled_pck_arm;
+  wire [KMAX_NUM_TLPS_PER_CLK-1:0]            slot_same_cycle;
+  wire [KMAX_NUM_TLPS_PER_CLK-1:0]            slot_cont_eop;
+  wire [KMAX_NUM_TLPS_PER_CLK-1:0]            slot_arm_new;
 
   wire [KMAX_NUM_TLPS_PER_CLK:0]              pck_ended;
 
@@ -104,6 +100,7 @@ module hls_bridge_qos_dti_pck_enc #(
                            gen_unpack_cntl)
   endgenerate
 
+  // idgroup[2:0] is LSB of per-slot unpacked metadata (bus bit 48 = meta[0] for slot 0).
   generate
     for (gv_x = 0; gv_x < KMAX_NUM_TLPS_PER_CLK; gv_x = gv_x + 1) begin : gen_stream_id
       always @(*) begin : process_cntl_metadata
@@ -113,97 +110,63 @@ module hls_bridge_qos_dti_pck_enc #(
           cntl_metadata_stream_id[gv_x] = {METADATA_STREAM_ID_WD{1'b0}};
       end
     end
-
-    if (KMAX_NUM_TLPS_PER_CLK == 1) begin : gen_no_sop_shift
-      assign sop_shift = spilled_pck_reg ? 1'b0 : cntl_sop;
-      assign eop_shift = spilled_pck_reg ? 1'b0 : cntl_eop;
-    end else begin : gen_sop_shift
-      assign sop_shift = spilled_pck_reg ? (cntl_sop << 1) : cntl_sop;
-      assign eop_shift = spilled_pck_reg ? (cntl_eop << 1) : cntl_eop;
-    end
   endgenerate
 
-  assign sop_no_eop     = sop_shift & ~eop_shift;
-  // Rising edge: ignore stuck SOP left high on an idle slot across cycles.
-  assign new_spill_slot = hls_rx_dti_valid & sop_no_eop & ~sop_shift_d;
-  assign spilled_pck_arm = !spilled_pck_reg & (|new_spill_slot);
-
-  // While spill is active slot 0 is reserved for that packet's continuation EOP.
-  assign spill_slot_eop = hls_rx_dti_valid & spilled_pck_reg &
-                          cntl_eop[0] & ~cntl_sop[0];
+  // Per-slot packet tracking — no global spill slot.
+  // Each slot scores only in that slot (same-cycle SOP+EOP or continuation EOP).
+  // Avoids cross-slot phantom counts (stream-3 stale spill closed by stream-0 EOP).
+  assign slot_same_cycle = hls_rx_dti_valid & cntl_sop & cntl_eop;
+  assign slot_cont_eop   = hls_rx_dti_valid & ~cntl_sop & cntl_eop & slot_armed_reg;
+  assign slot_arm_new    = hls_rx_dti_valid & cntl_sop & ~cntl_eop & ~slot_armed_reg;
 
   assign pck_ended[KMAX_NUM_TLPS_PER_CLK-1:0] =
-      hls_rx_dti_valid ? (sop_shift & eop_shift) : {KMAX_NUM_TLPS_PER_CLK{1'b0}};
-  assign pck_ended[KMAX_NUM_TLPS_PER_CLK] = spill_slot_eop;
-
-  always @(*) begin : process_spilled_pck_comb
-    if (spilled_pck_arm)
-      spilled_pck_next = 1'b1;
-    else if (spill_slot_eop)
-      spilled_pck_next = 1'b0;
-    else
-      spilled_pck_next = spilled_pck_reg;
-  end
-
-  // Latch stream ID only when spill arms (not every cycle with stuck SOP).
-  always @(*) begin : spilled_stream_id
-    integer i;
-    spilled_pck_stream_id = spilled_pck_stream_id_reg;
-    if (spilled_pck_arm) begin
-      for (i = 0; i < KMAX_NUM_TLPS_PER_CLK; i = i + 1) begin
-        if (new_spill_slot[i]) begin
-          if (spilled_pck_reg && (i != 0))
-            spilled_pck_stream_id = cntl_metadata_stream_id[i-1];
-          else
-            spilled_pck_stream_id = cntl_metadata_stream_id[i];
-        end
-      end
-    end
-  end
+      slot_same_cycle | slot_cont_eop;
+  assign pck_ended[KMAX_NUM_TLPS_PER_CLK] = 1'b0;
 
   always @(*) begin : full_pck_detection
     integer i;
     for (i = 0; i < KMAX_NUM_TLPS_PER_CLK; i = i + 1) begin
-      if (sop_shift[i] & eop_shift[i] & hls_rx_dti_valid) begin
-        if (spilled_pck_reg && (i != 0))
-          dti_stream[i] = cntl_metadata_stream_id[i-1];
-        else
-          dti_stream[i] = cntl_metadata_stream_id[i];
-      end
+      if (slot_same_cycle[i])
+        dti_stream[i] = cntl_metadata_stream_id[i];
+      else if (slot_cont_eop[i])
+        dti_stream[i] = slot_stream_reg[i];
       else
-        dti_stream[i] = 3'b000;
+        dti_stream[i] = {METADATA_STREAM_ID_WD{1'b0}};
     end
   end
 
   always @(posedge core_clk or negedge core_rst_n) begin : process_seq
     integer i;
     if (core_rst_n == 1'b0) begin
-      dti_valid                 <= 1'b0;
-      pck_ended_reg             <= {KMAX_NUM_TLPS_PER_CLK+1{1'b0}};
-      spilled_pck_reg           <= 1'b0;
-      spilled_pck_stream_id_reg <= 3'b000;
-      sop_shift_d               <= {KMAX_NUM_TLPS_PER_CLK{1'b0}};
-      for (i = 0; i <= KMAX_NUM_TLPS_PER_CLK; i = i + 1)
-        dti_stream_reg[i]       <= 3'b000;
+      dti_valid          <= 1'b0;
+      pck_ended_reg      <= {KMAX_NUM_TLPS_PER_CLK+1{1'b0}};
+      slot_armed_reg     <= {KMAX_NUM_TLPS_PER_CLK{1'b0}};
+      for (i = 0; i < KMAX_NUM_TLPS_PER_CLK; i = i + 1) begin
+        slot_stream_reg[i] <= {METADATA_STREAM_ID_WD{1'b0}};
+        dti_stream_reg[i]  <= {METADATA_STREAM_ID_WD{1'b0}};
+      end
+      dti_stream_reg[KMAX_NUM_TLPS_PER_CLK] <= {METADATA_STREAM_ID_WD{1'b0}};
     end
     else if (hls_rx_dti_valid) begin
-      dti_valid                 <= 1'b1;
-      pck_ended_reg             <= pck_ended;
-      spilled_pck_reg           <= spilled_pck_next;
-      if (spill_slot_eop)
-        spilled_pck_stream_id_reg <= 3'b000;
-      else if (spilled_pck_arm)
-        spilled_pck_stream_id_reg <= spilled_pck_stream_id;
-      sop_shift_d               <= sop_shift;
-      for (i = 0; i < KMAX_NUM_TLPS_PER_CLK; i = i + 1)
-        dti_stream_reg[i]                     <= dti_stream[i];
-      dti_stream_reg[KMAX_NUM_TLPS_PER_CLK]   <= spilled_pck_stream_id_reg;
+      dti_valid      <= 1'b1;
+      pck_ended_reg  <= pck_ended;
+      for (i = 0; i < KMAX_NUM_TLPS_PER_CLK; i = i + 1) begin
+        dti_stream_reg[i] <= dti_stream[i];
+        if (slot_same_cycle[i] || slot_cont_eop[i])
+          slot_armed_reg[i] <= 1'b0;
+        else if (slot_arm_new[i]) begin
+          slot_armed_reg[i]  <= 1'b1;
+          slot_stream_reg[i] <= cntl_metadata_stream_id[i];
+        end
+      end
+      dti_stream_reg[KMAX_NUM_TLPS_PER_CLK] <= {METADATA_STREAM_ID_WD{1'b0}};
     end
     else begin
-      dti_valid                 <= 1'b0;
-      pck_ended_reg             <= {KMAX_NUM_TLPS_PER_CLK+1{1'b0}};
+      dti_valid     <= 1'b0;
+      pck_ended_reg <= {KMAX_NUM_TLPS_PER_CLK+1{1'b0}};
       for (i = 0; i < KMAX_NUM_TLPS_PER_CLK; i = i + 1)
-        dti_stream_reg[i]       <= 3'b000;
+        dti_stream_reg[i] <= {METADATA_STREAM_ID_WD{1'b0}};
+      // Hold slot_armed_reg / slot_stream_reg across valid bubbles (multi-beat TLP)
     end
   end
 
