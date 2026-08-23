@@ -51,7 +51,11 @@ tdata=0x002001
 The monitor map is doing the right thing. That extra NP stream-0 beat is **not** a group-index bug.
 
 1. Confirm `cdn_pcie_hls_bridge_qos_stream_seq::body()` does **not** fork `send_compl_qos`. Completions are `tlp_type=1`, `stream=port`; port 0 looks identical to this tdata. If you removed completion expected counts but still drive completion QoS, you get exactly `observed = expected+1`.
-2. If there is DTI NP traffic, copy `rtl/hls_bridge_qos_dti_pck_enc.sv` over the DUT encoder. The global spill slot plus `spilled_pck_stream_id = 3'b000` in the for-loop pulses a phantom NP stream-0 enable. The monitor cannot predict that.
+2. If there is DTI NP traffic, copy `rtl/hls_bridge_qos_dti_pck_enc.sv` over the DUT encoder. Same original module; four small edits:
+   - stream ID from unpacked metadata `[0 +: 3]` (not bit 48 of a 10-bit field)
+   - spill credit only on continuation EOP (`cntl_eop & ~cntl_sop`), not any EOP
+   - do not clear `spilled_pck_stream_id` to `3'b000` inside the for-loop
+   - hold spill state across `valid=0` bubbles
 
 ## HAL expected-count snippets
 
