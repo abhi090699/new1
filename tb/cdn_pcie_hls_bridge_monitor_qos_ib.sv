@@ -83,7 +83,25 @@
 `endif
 
   //----- process_hls_ib_compl_hal_pkt_ended ---------------------------------
-  // Delete the entire `ifdef HLSB_QOS_SUPP block. hls_bridge_qos has no CPL group.
+  // DELETE the entire `ifdef HLSB_QOS_SUPP block (not just send_compl_qos).
+  // The old increment was NP&REQ = S+port. Port 0 -> group 8. That is this
+  // error if it is still in the file:
+  //   QOS_TX_NEVER_FIRED group=8 expected=0x805 DUT TX never fired
+
+  //----- check_phase QoS loop (around QOS_TX_NEVER_FIRED) -------------------
+  // Replace the loop that does:
+  //   if (expected != 0 && observed == 0) QOS_TX_NEVER_FIRED
+  // Groups with observed==0 are leftover completion/DTI expected. Skip them.
+  // Only compare groups the DUT actually reported.
+  //
+  // for (int g = 0; g < (parameters_cfg_pkg::LBB_NUM_TLP_STREAMS * 2); g++) begin
+  //   if (m_qos_observed_count[g] == 0)
+  //     continue;
+  //   if (m_qos_observed_count[g] != m_qos_expected_count[g])
+  //     `uvm_error({msg_id, "[QOS_MISMATCH]"},
+  //       $sformatf("group=%0d observed=0x%0h expected=0x%0h",
+  //         g, m_qos_observed_count[g], m_qos_expected_count[g]))
+  // end
 
   //----- process_tlp_qos_tx -------------------------------------------------
   // No QOS_MIDTEST_ERR. If DUT (DTI encoder, early TX) is ahead of AXI/MSI
