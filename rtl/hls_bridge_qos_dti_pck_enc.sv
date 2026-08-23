@@ -5,6 +5,7 @@ module hls_bridge_qos_dti_pck_enc #(
   /////////////////////////////////////////////////////////////////////////////
   /*BSF:doc=Maximum number of TLPs supported per clock;*/
   parameter KMAX_NUM_TLPS_PER_CLK      = 4,
+  /*BSF:doc=Number of HLS ports on AXI-Bridge side;*/
   /*BSF:doc=DTI HLS control bus width (calculated at top level);*/
   parameter HLS_DTI_CNTL_WD            = 1024,
   /*BSF:doc=Maximum data path width supported in the design;*/
@@ -21,6 +22,7 @@ module hls_bridge_qos_dti_pck_enc #(
   parameter IS_POSTED                  = 1,
 
   localparam METADATA_STREAM_ID_WD     = 3,
+  localparam METADATA_STREAM_ID_OFFSET = 48,
   localparam LBB_NUM_TLP_STREAMS_MAX   = 8,
   localparam HLS_HAL_STR_PTR_WD        = $clog2(KMAX_DATAPATH_WD/HLS_DW_ALIGNMENT/32),
   localparam HLS_HAL_END_PTR_WD        = $clog2(KMAX_DATAPATH_WD/32),
@@ -31,51 +33,78 @@ module hls_bridge_qos_dti_pck_enc #(
   /*BSF:isReset=1,clock=core_clk,doc=Core active-low reset;*/
   input  wire                                               core_rst_n,
 
+  //----------------------------------------------------------------------------
+  // DTI HLS RX control interface (Posted or Non-Posted channel)
+  //----------------------------------------------------------------------------
+  /*BSF_IF:dti_pck_enc_rx_if,core_clk,core_rst_n,nipio=0
+  ,dis=DTI HLS RX interface (Posted or Non-Posted channel)
+  ;*/
   input  wire                                               hls_rx_dti_valid,
-  input  wire [HLS_DTI_CNTL_WD-1:0]                         hls_rx_dti_cntl,
+  input  wire [HLS_DTI_CNTL_WD-1:0]                        hls_rx_dti_cntl,
+  //BSF_IF_END:dti_pck_enc_rx_if;
 
-  output wire [(KMAX_NUM_TLPS_PER_CLK+1)*COUNT_NUMBER-1:0]  dti_num_en_out
+  //----------------------------------------------------------------------------
+  // QoS counter-enable output (flattened 2D array)
+  //   Flat layout: [cnt*(K+1) +: (K+1)] = counter group 'cnt', K+1 slots
+  //   (slots 0..K-1 = normal TLP slots, slot K = spilled-packet slot)
+  //----------------------------------------------------------------------------
+  /*BSF_IF:dti_pck_enc_tx_if,core_clk,core_rst_n,ipio=0
+  ,dis=Per-slot counter-group enable flat output (before transpose)
+  ;*/
+  output wire [(KMAX_NUM_TLPS_PER_CLK+1)*COUNT_NUMBER-1:0] dti_num_en_out
+  //BSF_IF_END:dti_pck_enc_tx_if;
 );
 
   /////////////////////////////////////////////////////////////////////////////
-  // Per-slot SOP/EOP tracking.
-  //
-  // The previous global spill slot caused QOS_MIDTEST_ERR on NP stream 0:
-  //   pck_ended[K] = spilled_pck_reg & (|cntl_eop)
-  // plus a for-loop that overwrote spilled_pck_stream_id with 3'b000.
-  // An unrelated EOP then pulsed an extra NP enable tagged as stream 0.
-  //
-  // Each slot now scores only itself: same-cycle SOP+EOP, or a continuation
-  // EOP while that slot is armed. Spill state is held across valid=0 bubbles.
-  // Stream ID is the LSB of the unpacked per-slot metadata (not bit 48 of a
-  // 10-bit vector, which is always 0).
+  // localparam declarations
   /////////////////////////////////////////////////////////////////////////////
 
+  // (all localparams are in the parameter list above)
+
+  /////////////////////////////////////////////////////////////////////////////
+  // reg declarations
+  /////////////////////////////////////////////////////////////////////////////
+
+  reg                                          spilled_pck_next;
+  reg [2:0]                                    spilled_pck_stream_id;
   reg [2:0]                                    dti_stream         [KMAX_NUM_TLPS_PER_CLK-1:0];
+
+  reg                                          dti_valid;
+  reg                                          spilled_pck_reg;
+  reg [2:0]                                    spilled_pck_stream_id_reg;
   reg [2:0]                                    dti_stream_reg     [KMAX_NUM_TLPS_PER_CLK:0];
   reg [METADATA_STREAM_ID_WD-1:0]              cntl_metadata_stream_id [KMAX_NUM_TLPS_PER_CLK-1:0];
 
-  reg [KMAX_NUM_TLPS_PER_CLK-1:0]              slot_armed_reg;
-  reg [METADATA_STREAM_ID_WD-1:0]              slot_stream_reg    [KMAX_NUM_TLPS_PER_CLK-1:0];
+  reg [KMAX_NUM_TLPS_PER_CLK:0]               pck_ended_reg;
 
-  reg [KMAX_NUM_TLPS_PER_CLK:0]                pck_ended_reg;
-  reg [LBB_NUM_TLP_STREAMS_MAX-1:0]            qos_stream_en [KMAX_NUM_TLPS_PER_CLK:0];
-  reg [COUNT_NUMBER-1:0]                       dti_num_en    [KMAX_NUM_TLPS_PER_CLK:0];
+  reg [LBB_NUM_TLP_STREAMS_MAX-1:0]           qos_stream_en [KMAX_NUM_TLPS_PER_CLK:0];
+  reg [COUNT_NUMBER-1:0]                      dti_num_en    [KMAX_NUM_TLPS_PER_CLK:0];
 
-  wire [KMAX_NUM_TLPS_PER_CLK-1:0]             slot_same_cycle;
-  wire [KMAX_NUM_TLPS_PER_CLK-1:0]             slot_cont_eop;
-  wire [KMAX_NUM_TLPS_PER_CLK-1:0]             slot_arm_new;
-  wire [KMAX_NUM_TLPS_PER_CLK:0]               pck_ended;
+  /////////////////////////////////////////////////////////////////////////////
+  // wire declarations
+  /////////////////////////////////////////////////////////////////////////////
 
-  wire [KMAX_NUM_TLPS_PER_CLK-1:0]             cntl_sop;
-  wire [KMAX_NUM_TLPS_PER_CLK-1:0]             cntl_eop;
-  wire [KMAX_NUM_TLPS_PER_CLK-1:0]             cntl_enderror;
-  wire [HLS_HAL_STR_PTR_WD-1:0]                cntl_strptr  [KMAX_NUM_TLPS_PER_CLK-1:0];
-  wire [HLS_HAL_END_PTR_WD-1:0]                cntl_endptr  [KMAX_NUM_TLPS_PER_CLK-1:0];
-  wire [HLS_METADATA_WD-1:0]                   cntl_metadata[KMAX_NUM_TLPS_PER_CLK-1:0];
+  wire [KMAX_NUM_TLPS_PER_CLK-1:0]            sop_shift;
+  wire                                         eop_detection;
+  wire                                         continuation_eop;
+  wire                                         spilled_pck;
+
+  wire [KMAX_NUM_TLPS_PER_CLK:0]              pck_ended;
+
+  wire [KMAX_NUM_TLPS_PER_CLK-1:0]            cntl_sop;
+  wire [KMAX_NUM_TLPS_PER_CLK-1:0]            cntl_eop;
+  wire [KMAX_NUM_TLPS_PER_CLK-1:0]            cntl_enderror;
+  wire [HLS_HAL_STR_PTR_WD-1:0]               cntl_strptr  [KMAX_NUM_TLPS_PER_CLK-1:0];
+  wire [HLS_HAL_END_PTR_WD-1:0]               cntl_endptr  [KMAX_NUM_TLPS_PER_CLK-1:0];
+  wire [HLS_METADATA_WD-1:0]                  cntl_metadata[KMAX_NUM_TLPS_PER_CLK-1:0];
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Logic
+  /////////////////////////////////////////////////////////////////////////////
 
   genvar gv_x;
 
+  // Unpack HLS control bus into SOP / EOP / STRPTR / ENDPTR / METADATA vectors
   generate
     `HLSB_HLS_UNPACK_CNTL(hls_rx_dti_cntl,
                            cntl_sop,
@@ -93,8 +122,11 @@ module hls_bridge_qos_dti_pck_enc #(
                            gen_unpack_cntl)
   endgenerate
 
+  // Extract stream ID from per-slot unpacked metadata LSBs.
+  // Do not slice [METADATA_STREAM_ID_OFFSET +: 3] — HLS_METADATA_WD is 10, so
+  // bit 48 is out of range and always reads as 0 (phantom stream 0).
   generate
-    for (gv_x = 0; gv_x < KMAX_NUM_TLPS_PER_CLK; gv_x = gv_x + 1) begin : gen_stream_id
+    for (gv_x = 0; gv_x < KMAX_NUM_TLPS_PER_CLK; gv_x = gv_x + 1) begin
       always @(*) begin : process_cntl_metadata
         if (hls_rx_dti_valid)
           cntl_metadata_stream_id[gv_x] = cntl_metadata[gv_x][0 +: METADATA_STREAM_ID_WD];
@@ -102,59 +134,97 @@ module hls_bridge_qos_dti_pck_enc #(
           cntl_metadata_stream_id[gv_x] = {METADATA_STREAM_ID_WD{1'b0}};
       end
     end
+
+  // SOP shift: when a spill is active, shift SOPs left by 1 to reserve slot 0
+  // for the spilled packet's EOP; for KMAX=1 there is no room to shift so
+  // suppress all SOPs instead (a new SOP cannot arrive while spill is pending).
+    if (KMAX_NUM_TLPS_PER_CLK == 1) begin : gen_no_sop_shift
+      assign sop_shift = spilled_pck_reg ? 1'b0 : cntl_sop;
+    end else begin : gen_sop_shift
+      assign sop_shift = spilled_pck_reg ? cntl_sop << 1 : cntl_sop;
+    end
   endgenerate
 
-  assign slot_same_cycle = hls_rx_dti_valid & cntl_sop & cntl_eop;
-  assign slot_cont_eop   = hls_rx_dti_valid & ~cntl_sop & cntl_eop & slot_armed_reg;
-  assign slot_arm_new    = hls_rx_dti_valid & cntl_sop & ~cntl_eop & ~slot_armed_reg;
+  // EOP detection: any EOP flag set while valid
+  assign eop_detection    = (|cntl_eop) & hls_rx_dti_valid;
+  // Continuation EOP: EOP with no SOP in that slot (closes a pending spill)
+  assign continuation_eop = |(cntl_eop & ~cntl_sop) & hls_rx_dti_valid;
+  // Spilled packet: a shifted SOP slot has no matching EOP this cycle
+  assign spilled_pck      = |(sop_shift & ~cntl_eop);
 
-  assign pck_ended[KMAX_NUM_TLPS_PER_CLK-1:0] = slot_same_cycle | slot_cont_eop;
-  assign pck_ended[KMAX_NUM_TLPS_PER_CLK]     = 1'b0;
+  // Per-slot packet-ended flags (K+1 bits: K normal slots + 1 spill slot)
+  assign pck_ended[KMAX_NUM_TLPS_PER_CLK-1:0] =
+      hls_rx_dti_valid ? (sop_shift & cntl_eop) : {KMAX_NUM_TLPS_PER_CLK{1'b0}};
+  // Score spill only on continuation EOP, not on any EOP (avoids extra NP stream 0)
+  assign pck_ended[KMAX_NUM_TLPS_PER_CLK] = spilled_pck_reg & continuation_eop;
 
+  // Spill state: set on spill detected, cleared when the deferred continuation EOP arrives
+  always @(*) begin : process_spilled_pck_comb
+    if (spilled_pck)
+      spilled_pck_next = 1'b1;
+    else if (continuation_eop && spilled_pck_reg)
+      spilled_pck_next = 1'b0;
+    else
+      spilled_pck_next = spilled_pck_reg;
+  end
+
+  // Spilled-packet stream ID: latch from the spilling SOP only.
+  // Do not clear to 3'b000 inside the for-loop — later slots were overwriting
+  // a valid ID and the extra spill credit landed on stream 0.
+  always @(*) begin : spilled_stream_id
+    integer i;
+    spilled_pck_stream_id = spilled_pck_stream_id_reg;
+    if (spilled_pck) begin
+      for (i = 0; i < KMAX_NUM_TLPS_PER_CLK; i = i + 1) begin
+        if (cntl_sop[i] & ~cntl_eop[i])
+          spilled_pck_stream_id = cntl_metadata_stream_id[i];
+      end
+    end
+    else if (!spilled_pck_reg)
+      spilled_pck_stream_id = 3'b000;
+  end
+
+  // Full-packet stream ID: capture stream ID for slots where SOP and EOP coincide
   always @(*) begin : full_pck_detection
     integer i;
     for (i = 0; i < KMAX_NUM_TLPS_PER_CLK; i = i + 1) begin
-      if (slot_same_cycle[i])
+      if (sop_shift[i] & cntl_eop[i] & hls_rx_dti_valid)
         dti_stream[i] = cntl_metadata_stream_id[i];
-      else if (slot_cont_eop[i])
-        dti_stream[i] = slot_stream_reg[i];
       else
-        dti_stream[i] = {METADATA_STREAM_ID_WD{1'b0}};
+        dti_stream[i] = 3'b000;
     end
   end
 
+  // Sequential: register all state
   always @(posedge core_clk or negedge core_rst_n) begin : process_seq
     integer i;
     if (core_rst_n == 1'b0) begin
-      pck_ended_reg  <= {KMAX_NUM_TLPS_PER_CLK+1{1'b0}};
-      slot_armed_reg <= {KMAX_NUM_TLPS_PER_CLK{1'b0}};
-      for (i = 0; i < KMAX_NUM_TLPS_PER_CLK; i = i + 1) begin
-        slot_stream_reg[i] <= {METADATA_STREAM_ID_WD{1'b0}};
-        dti_stream_reg[i]  <= {METADATA_STREAM_ID_WD{1'b0}};
-      end
-      dti_stream_reg[KMAX_NUM_TLPS_PER_CLK] <= {METADATA_STREAM_ID_WD{1'b0}};
+      dti_valid                 <= 1'b0;
+      pck_ended_reg             <= {KMAX_NUM_TLPS_PER_CLK+1{1'b0}};
+      spilled_pck_reg           <= 1'b0;
+      spilled_pck_stream_id_reg <= 3'b000;
+      for (i = 0; i <= KMAX_NUM_TLPS_PER_CLK; i = i + 1)
+        dti_stream_reg[i]       <= 3'b000;
     end
     else if (hls_rx_dti_valid) begin
-      pck_ended_reg <= pck_ended;
-      for (i = 0; i < KMAX_NUM_TLPS_PER_CLK; i = i + 1) begin
-        dti_stream_reg[i] <= dti_stream[i];
-        if (slot_same_cycle[i] || slot_cont_eop[i])
-          slot_armed_reg[i] <= 1'b0;
-        else if (slot_arm_new[i]) begin
-          slot_armed_reg[i]  <= 1'b1;
-          slot_stream_reg[i] <= cntl_metadata_stream_id[i];
-        end
-      end
-      dti_stream_reg[KMAX_NUM_TLPS_PER_CLK] <= {METADATA_STREAM_ID_WD{1'b0}};
+      dti_valid                 <= hls_rx_dti_valid;
+      pck_ended_reg             <= pck_ended;
+      spilled_pck_reg           <= spilled_pck_next;
+      spilled_pck_stream_id_reg <= spilled_pck_stream_id;
+      for (i = 0; i < KMAX_NUM_TLPS_PER_CLK; i = i + 1)
+        dti_stream_reg[i]                     <= dti_stream[i];
+      dti_stream_reg[KMAX_NUM_TLPS_PER_CLK]   <= spilled_pck_stream_id;
     end
     else begin
-      pck_ended_reg <= {KMAX_NUM_TLPS_PER_CLK+1{1'b0}};
-      for (i = 0; i < KMAX_NUM_TLPS_PER_CLK; i = i + 1)
-        dti_stream_reg[i] <= {METADATA_STREAM_ID_WD{1'b0}};
-      // Hold slot_armed_reg / slot_stream_reg across valid=0 bubbles.
+      dti_valid                 <= 1'b0;
+      pck_ended_reg             <= {KMAX_NUM_TLPS_PER_CLK+1{1'b0}};
+      for (i = 0; i <= KMAX_NUM_TLPS_PER_CLK; i = i + 1)
+        dti_stream_reg[i]       <= 3'b000;
+      // Hold spilled_pck_reg / spilled_pck_stream_id_reg across valid=0 bubbles
     end
   end
 
+  // Decode 3-bit stream ID to one-hot 8-bit vector per slot
   always @(*) begin : stream_en_decode
     integer i;
     for (i = 0; i <= KMAX_NUM_TLPS_PER_CLK; i = i + 1) begin
@@ -168,7 +238,6 @@ module hls_bridge_qos_dti_pck_enc #(
           3'b101 : qos_stream_en[i] = 8'b00100000;
           3'b110 : qos_stream_en[i] = 8'b01000000;
           3'b111 : qos_stream_en[i] = 8'b10000000;
-          default: qos_stream_en[i] = 8'h00;
         endcase
       end
       else
@@ -176,8 +245,11 @@ module hls_bridge_qos_dti_pck_enc #(
     end
   end
 
+  // Counter-group encoding — selected by IS_POSTED at elaboration time.
+  // Bus layout: {NP[N], P[N]}  (N = LBB_NUM_TLP_STREAMS)
   generate
     if (IS_POSTED) begin : gen_posted_encode
+      // Posted: {NP{0}, P{en}}
       always @(*) begin : counter_en_encode
         integer i;
         for (i = 0; i <= KMAX_NUM_TLPS_PER_CLK; i = i + 1) begin
@@ -189,6 +261,7 @@ module hls_bridge_qos_dti_pck_enc #(
       end
     end
     else begin : gen_nonposted_encode
+      // Non-Posted: {NP{en}, P{0}}
       always @(*) begin : counter_en_encode
         integer i;
         for (i = 0; i <= KMAX_NUM_TLPS_PER_CLK; i = i + 1) begin
@@ -201,6 +274,9 @@ module hls_bridge_qos_dti_pck_enc #(
     end
   endgenerate
 
+  // Flatten dti_num_en[slot][count] to output port using HLSB_2D_TO_WIDE
+  // Outer dim = KMAX_NUM_TLPS_PER_CLK+1 slots, inner dim = COUNT_NUMBER groups
+  // Transpose and OR with NP path is performed in the parent (hls_bridge_qos).
   generate
     `HLSB_2D_TO_WIDE(dti_num_en_flat, dti_num_en, gen_num_en_flat,
                      (KMAX_NUM_TLPS_PER_CLK+1), COUNT_NUMBER)
