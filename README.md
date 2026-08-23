@@ -51,11 +51,18 @@ tdata=0x002001
 The monitor map is doing the right thing. That extra NP stream-0 beat is **not** a group-index bug.
 
 1. Confirm `cdn_pcie_hls_bridge_qos_stream_seq::body()` does **not** fork `send_compl_qos`. Completions are `tlp_type=1`, `stream=port`; port 0 looks identical to this tdata. If you removed completion expected counts but still drive completion QoS, you get exactly `observed = expected+1`.
-2. If there is DTI NP traffic, copy `rtl/hls_bridge_qos_dti_pck_enc.sv` over the DUT encoder. Same original module; four small edits:
-   - stream ID from unpacked metadata `[0 +: 3]` (not bit 48 of a 10-bit field)
-   - spill credit only on continuation EOP (`cntl_eop & ~cntl_sop`), not any EOP
-   - do not clear `spilled_pck_stream_id` to `3'b000` inside the for-loop
-   - hold spill state across `valid=0` bubbles
+2. If there is DTI NP traffic, copy `rtl/hls_bridge_qos_dti_pck_enc.sv` over the DUT encoder.
+
+   Do **not** keep the original `SOP << 1` / `|eop` spill slot, and do **not** use
+   per-slot armed flags. Those two approaches either extra-count NP stream 0 or
+   miss a packet that SOPs in one slot and EOPs in another.
+
+   This copy walks slots 0..K-1 in order with a **single** in-flight packet:
+   - stream ID from unpacked metadata `[5:3]` (not VC `[2:0]`, not bit 48)
+   - `SOP & EOP` on a slot -> one credit for that slot's stream
+   - `SOP & ~EOP` -> arm, latch stream
+   - `~SOP & EOP` while armed -> one credit with the latched stream, then disarm
+   - hold arm/stream across `valid=0`; slot K is unused
 
 ## HAL expected-count snippets
 
