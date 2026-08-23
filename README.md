@@ -1,12 +1,12 @@
 # IB QoS TB alignment with `hls_bridge_qos`
 
 The DUT QoS block no longer uses a 4-way {P/NP} x {REQ/RESP} map or a `qos_type` bit.
-Copy these files over the TB sources of the same name.
+Copy these files over the TB sources of the same name. **Do not patch the DUT DTI encoder.**
 
 | File | Use |
 |------|-----|
 | `tb/cdn_pcie_hls_bridge_qos_stream_seq.sv` | Drop-in replacement for the QoS AXI-stream sequence |
-| `tb/cdn_pcie_hls_bridge_monitor_qos_ib.sv` | IB QoS helper + `process_tlp_qos_tx` + comments for the HAL expected-count sites |
+| `tb/cdn_pcie_hls_bridge_monitor_qos_ib.sv` | IB QoS helper + `process_tlp_qos_tx` + HAL sites |
 
 ## DUT tdata (`TLP_QOS_TDATA_WIDTH = 24`)
 
@@ -14,7 +14,7 @@ Copy these files over the TB sources of the same name.
 |------|--------|---------|
 | `[12:0]` | COUNT | number of TLPs in this report |
 | `[13]` | TLP_TYPE | `0` Posted, `1` Non-Posted |
-| `[16:14]` | TLP_STREAM | `idgroup[2:0]` |
+| `[16:14]` | TLP_STREAM | stream |
 | `[23:17]` | unused | 0 |
 
 Counter layout (`COUNT_NUMBER = LBB_NUM_TLP_STREAMS * 2`):
@@ -27,58 +27,28 @@ Counter layout (`COUNT_NUMBER = LBB_NUM_TLP_STREAMS * 2`):
 
 | Path | Old expected groups | New expected group |
 |------|---------------------|--------------------|
-| AXI Posted | `2S + stream` (P&RESP) | `stream` (Posted) |
-| AXI NonPosted | `3S + stream` (NP&RESP) | `S + stream` (Non-Posted) |
-| AXI Completion | `S + port` (NP&REQ) | **none** — DUT has no CPL QoS |
+| AXI Posted | `2S + stream` (P&RESP) | `stream` (Posted); write `qos_ap` |
+| AXI NonPosted | `3S + stream` (NP&RESP) | `S + stream`; write `qos_ap` |
+| AXI Completion | `S + port` (NP&REQ) | **none** |
 | MSI Posted | `stream` **and** `2S + stream` | `stream` only |
-| DTI Posted | `stream` **and** `2S + stream` | `stream` only; **do not** write `qos_ap` |
-| DTI NonPosted | `S + stream` **and** `3S + stream` | `S + stream` only |
+| DTI Posted / NonPosted | per-stream expected from HAL idgroup | **do not** write `qos_ap`; **do not** increment `m_qos_expected_count` |
 
-Sequence:
+Sequence: pack `{stream, tlp_type, count}` at `[16:0]`. No `qos_type`. No `send_compl_qos`.
 
-- Pack `{stream, tlp_type, count}` at `[16:0]`. Drop `qos_type`.
-- Drive Posted (`tlp_type=0`) and NonPosted (`tlp_type=1`) only. Do not send completion QoS.
+Monitor `build_phase`: maps `* 2` (was `* 4`). Also zero `m_qos_dti_hal[2]` and `m_qos_dti_pending[2]`.
 
-Monitor `build_phase` init: `LBB_NUM_TLP_STREAMS * 2` (was `* 4`).
+## DTI is scoreboarded in the TB, not by patching the encoder
 
-## If monitor is already patched and you still see
+`hls_bridge_qos_dti_pck_enc` reports on its own stream/beat rules. Predicting `S+idgroup` at HAL `pkt_ended` missed those reports (`group=9 expected=0`) and extra SOP/EOP beats (`group=8 observed=6 expected=1`), and raced when QoS TX arrived first.
 
-```
-QOS_MIDTEST_ERR group=8 stream=0 tlp_type=1 observed = expected+1
-tdata=0x002001
-```
+Instead:
 
-The monitor map is doing the right thing. That extra NP stream-0 beat is **not** a group-index bug.
+1. Add `int m_qos_dti_hal[2]` and `int m_qos_dti_pending[2]` to the monitor class.
+2. On HAL `ROUTE_TO_DTI`, increment both for Posted (`[0]`) or NP (`[1]`). Do not touch `m_qos_expected_count`.
+3. Replace `process_tlp_qos_tx`: drop `QOS_MIDTEST_ERR`. If observed would exceed AXI/MSI expected, attribute the overage to DTI on the **stream in DUT tdata** (`m_qos_dti_pending[tlp_type] -= over`, fold into `m_qos_expected_count[group]`).
+4. Call `check_qos_counts()` from `check_phase` (and remove any `observed != expected` loop, or keep it — after attribution they match per group).
+5. Leave the DUT encoder as-is.
 
-1. Confirm `cdn_pcie_hls_bridge_qos_stream_seq::body()` does **not** fork `send_compl_qos`. Completions are `tlp_type=1`, `stream=port`; port 0 looks identical to this tdata. If you removed completion expected counts but still drive completion QoS, you get exactly `observed = expected+1`.
-2. If there is DTI NP traffic, copy `rtl/hls_bridge_qos_dti_pck_enc.sv` over the DUT encoder.
-
-   Do **not** keep the original `SOP << 1` / `|eop` spill slot, and do **not** use
-   per-slot armed flags. Those two approaches either extra-count NP stream 0 or
-   miss a packet that SOPs in one slot and EOPs in another.
-
-   This copy walks slots 0..K-1 in order with a **single** in-flight packet:
-   - stream ID from unpacked metadata `[5:3]` (not VC `[2:0]`, not bit 48)
-   - `SOP & EOP` on a slot -> one credit for that slot's stream
-   - `SOP & ~EOP` -> arm, latch stream
-   - `~SOP & EOP` while armed -> one credit with the latched stream, then disarm
-   - hold arm/stream across `valid=0`; slot K is unused
-
-## HAL expected-count snippets
-
-Posted MSI (`ROUTE_TO_MSI`):
-
-```systemverilog
-int l_p_group = qos_group_idx(1'b0, 3'(l_stream));
-m_qos_expected_count[l_p_group]++;
-```
-
-Posted DTI (`ROUTE_TO_DTI`): increment the same P group; do **not** call `m_hls_ib_posted_qos_ap[0].write()`.
-
-Posted AXI (`ROUTE_TO_AXI`): write `m_hls_ib_posted_qos_ap[l_hls_port_num]` then increment the P group.
-
-NonPosted AXI: write `m_hls_ib_nonposted_qos_ap[l_hls_port_num]` then increment `qos_group_idx(1'b1, 3'(l_stream))`.
-
-NonPosted DTI: increment the NP group only.
+`check_qos_counts` still fails if AXI/MSI credits are missing, if HAL DTI never appears on QoS TX (`pending > 0`), or if QoS TX overages occur with **no** DTI HAL packets of that type (`hal==0 && pending<0`). Extra encoder beats with real DTI traffic (`hal>0 && pending<0`) are allowed.
 
 Completions: delete the `HLSB_QOS_SUPP` block in `process_hls_ib_compl_hal_pkt_ended`.
