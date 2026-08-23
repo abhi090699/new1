@@ -135,13 +135,15 @@ module hls_bridge_qos_dti_pck_enc #(
       end
     end
 
-  // SOP shift: when a spill is active, shift SOPs left by 1 to reserve slot 0
-  // for the spilled packet's EOP; for KMAX=1 there is no room to shift so
-  // suppress all SOPs instead (a new SOP cannot arrive while spill is pending).
+  // Do not AND a shifted SOP with an unshifted EOP. That pairs SOP[i] with
+  // EOP[i+1] and pulses a phantom credit using slot i+1's stream ID
+  // (QOS_MIDTEST_ERR group=9 stream=1 expected=0).
+  // Same-cycle packets score on their own slot (sop & eop). While a spill is
+  // pending on KMAX=1, suppress same-cycle SOP so the only slot can finish.
     if (KMAX_NUM_TLPS_PER_CLK == 1) begin : gen_no_sop_shift
       assign sop_shift = spilled_pck_reg ? 1'b0 : cntl_sop;
     end else begin : gen_sop_shift
-      assign sop_shift = spilled_pck_reg ? cntl_sop << 1 : cntl_sop;
+      assign sop_shift = cntl_sop;
     end
   endgenerate
 
@@ -149,13 +151,13 @@ module hls_bridge_qos_dti_pck_enc #(
   assign eop_detection    = (|cntl_eop) & hls_rx_dti_valid;
   // Continuation EOP: EOP with no SOP in that slot (closes a pending spill)
   assign continuation_eop = |(cntl_eop & ~cntl_sop) & hls_rx_dti_valid;
-  // Spilled packet: a shifted SOP slot has no matching EOP this cycle
-  assign spilled_pck      = |(sop_shift & ~cntl_eop);
+  // Spilled packet: SOP with no EOP on the same slot this cycle
+  assign spilled_pck      = |(cntl_sop & ~cntl_eop) & hls_rx_dti_valid;
 
   // Per-slot packet-ended flags (K+1 bits: K normal slots + 1 spill slot)
   assign pck_ended[KMAX_NUM_TLPS_PER_CLK-1:0] =
       hls_rx_dti_valid ? (sop_shift & cntl_eop) : {KMAX_NUM_TLPS_PER_CLK{1'b0}};
-  // Score spill only on continuation EOP, not on any EOP (avoids extra NP stream 0)
+  // Score spill only on continuation EOP, not on any EOP
   assign pck_ended[KMAX_NUM_TLPS_PER_CLK] = spilled_pck_reg & continuation_eop;
 
   // Spill state: set on spill detected, cleared when the deferred continuation EOP arrives
@@ -189,7 +191,7 @@ module hls_bridge_qos_dti_pck_enc #(
     integer i;
     for (i = 0; i < KMAX_NUM_TLPS_PER_CLK; i = i + 1) begin
       if (sop_shift[i] & cntl_eop[i] & hls_rx_dti_valid)
-        dti_stream[i] = cntl_metadata_stream_id[i];
+        dti_stream[i] = cntl_metadata_stream_id[i]; // same slot as sop&eop
       else
         dti_stream[i] = 3'b000;
     end
