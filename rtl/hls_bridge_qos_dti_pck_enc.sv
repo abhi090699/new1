@@ -86,6 +86,7 @@ module hls_bridge_qos_dti_pck_enc #(
 
   wire [KMAX_NUM_TLPS_PER_CLK-1:0]            sop_shift;
   wire                                         eop_detection;
+  wire                                         continuation_eop;
   wire                                         spilled_pck;
 
   wire [KMAX_NUM_TLPS_PER_CLK:0]              pck_ended;
@@ -139,45 +140,47 @@ module hls_bridge_qos_dti_pck_enc #(
     if (KMAX_NUM_TLPS_PER_CLK == 1) begin : gen_no_sop_shift
       assign sop_shift = spilled_pck_reg ? 1'b0 : cntl_sop;
     end else begin : gen_sop_shift
-      assign sop_shift = spilled_pck_reg ? cntl_sop << 1 : cntl_sop;
+      // Same slot: do not << 1 (that ANDs SOP[i] with EOP[i+1] and
+      // dumps extra NP credits on stream 0: observed=6 expected=1).
+      assign sop_shift = cntl_sop;
     end
   endgenerate
 
   // EOP detection: any EOP flag set while valid
-  assign eop_detection = (|cntl_eop) & hls_rx_dti_valid;
-  // Spilled packet: a shifted SOP slot has no matching EOP this cycle
-  assign spilled_pck   = |(sop_shift & ~cntl_eop);
+  assign eop_detection    = (|cntl_eop) & hls_rx_dti_valid;
+  assign continuation_eop = |(cntl_eop & ~cntl_sop) & hls_rx_dti_valid;
+  // Spilled packet: SOP with no EOP on the same slot
+  assign spilled_pck      = |(cntl_sop & ~cntl_eop) & hls_rx_dti_valid;
 
   // Per-slot packet-ended flags (K+1 bits: K normal slots + 1 spill slot)
   assign pck_ended[KMAX_NUM_TLPS_PER_CLK-1:0] =
       hls_rx_dti_valid ? (sop_shift & cntl_eop) : {KMAX_NUM_TLPS_PER_CLK{1'b0}};
-  assign pck_ended[KMAX_NUM_TLPS_PER_CLK] = spilled_pck_reg & eop_detection;
+  // Only a continuation EOP (EOP, no SOP) closes the spill slot
+  assign pck_ended[KMAX_NUM_TLPS_PER_CLK] = spilled_pck_reg & continuation_eop;
 
-  // Spill state: set on spill detected, cleared when the deferred EOP arrives
+  // Spill state: set on spill detected, cleared on continuation EOP
   always @(*) begin : process_spilled_pck_comb
     if (spilled_pck)
       spilled_pck_next = 1'b1;
-    else if (eop_detection && spilled_pck_reg)
+    else if (continuation_eop && spilled_pck_reg)
       spilled_pck_next = 1'b0;
     else
       spilled_pck_next = spilled_pck_reg;
   end
 
-  // Spilled-packet stream ID: latch the stream ID of the spilling SOP
+  // Spilled-packet stream ID: latch from the SOP-without-EOP slot only.
+  // Do not write 3'b000 in the loop — that tagged extra credits as stream 0.
   always @(*) begin : spilled_stream_id
     integer i;
-    for (i = 0; i < KMAX_NUM_TLPS_PER_CLK; i = i + 1) begin
-      if (spilled_pck) begin
+    spilled_pck_stream_id = spilled_pck_stream_id_reg;
+    if (spilled_pck) begin
+      for (i = 0; i < KMAX_NUM_TLPS_PER_CLK; i = i + 1) begin
         if (cntl_sop[i] & ~cntl_eop[i])
           spilled_pck_stream_id = cntl_metadata_stream_id[i];
-        else if (eop_detection)
-          spilled_pck_stream_id = 3'b000;
-        else
-          spilled_pck_stream_id = spilled_pck_stream_id_reg;
       end
-      else
-        spilled_pck_stream_id = 3'b000;
     end
+    else if (!spilled_pck_reg)
+      spilled_pck_stream_id = 3'b000;
   end
 
   // Full-packet stream ID: capture stream ID for slots where SOP and EOP coincide
@@ -214,10 +217,9 @@ module hls_bridge_qos_dti_pck_enc #(
     else begin
       dti_valid                 <= 1'b0;
       pck_ended_reg             <= {KMAX_NUM_TLPS_PER_CLK+1{1'b0}};
-      spilled_pck_reg           <= 1'b0;
-      spilled_pck_stream_id_reg <= 3'b000;
       for (i = 0; i <= KMAX_NUM_TLPS_PER_CLK; i = i + 1)
         dti_stream_reg[i]       <= 3'b000;
+      // Hold spilled_pck_reg / spilled_pck_stream_id_reg across valid=0
     end
   end
 
