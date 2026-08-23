@@ -51,29 +51,38 @@
 `endif
 
   //----- process_hls_ib_nonposted_hal_pkt_ended -----------------------------
-  // AXI:
+  //
+  // group=9 stream=1 expected=0 is this block. DUT NP DTI counts internally
+  // (IS_POSTED=0 -> group S+stream). The old TB did:
+  //   m_qos_expected_count[1*S + stream]++;  // NP&REQ  == 2-group NP (KEEP)
+  //   m_qos_expected_count[3*S + stream]++;  // NP&RESP == unused now (DELETE)
+  // If you deleted the first line or left only 3*S, QOS_TX group 9 sees expected=0.
+  //
+  // Put DTI QoS *after* the scoreboard if/else, not only inside
+  // `ifdef DTI_TB_IN_PASSIVE_MODE / else if (ROUTE_TO_DTI).
+
+  // AXI NP (sequence drives AXI QoS RX):
 `ifdef HLSB_QOS_SUPP
-  if (parameters_cfg_pkg::LBB_SUPPORT) begin
+  if (parameters_cfg_pkg::LBB_SUPPORT && (l_route_to == ROUTE_TO_AXI)) begin
     int l_stream   = int'(hls_ib_nonposted_hal_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0]);
-    int l_np_group = qos_group_idx(1'b1, 3'(l_stream));
+    int l_np_group = qos_group_idx(1'b1, 3'(l_stream)); // S + stream  (NOT 3*S)
     m_hls_ib_nonposted_qos_ap[l_hls_port_num].write(hls_ib_nonposted_hal_tlp_pkt);
     m_qos_expected_count[l_np_group]++;
     `uvm_info("QOS_EXP_AXI",
       $sformatf("NONPOSTED AXI: port=%0d stream=%0d group=%0d expected=%0d",
-        l_hls_port_num, l_stream, l_np_group, m_qos_expected_count[l_np_group]), UVM_DEBUG)
-    // FIFO_CRD_DW expected accumulation stays as-is
+        l_hls_port_num, l_stream, l_np_group, m_qos_expected_count[l_np_group]), UVM_MEDIUM)
   end
 `endif
 
-  // DTI:
+  // DTI NP (DUT encoder counts; do NOT write qos_ap; DO increment expected):
 `ifdef HLSB_QOS_SUPP
-  if (parameters_cfg_pkg::LBB_SUPPORT) begin
+  if (parameters_cfg_pkg::LBB_SUPPORT && (l_route_to == ROUTE_TO_DTI)) begin
     int l_stream   = int'(hls_ib_nonposted_hal_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0]);
-    int l_np_group = qos_group_idx(1'b1, 3'(l_stream));
+    int l_np_group = qos_group_idx(1'b1, 3'(l_stream)); // S + stream  (NOT 3*S)
     m_qos_expected_count[l_np_group]++;
     `uvm_info("QOS_EXP_DTI",
-      $sformatf("NONPOSTED DTI: stream=%0d NP group=%0d expected=%0d",
-        l_stream, l_np_group, m_qos_expected_count[l_np_group]), UVM_DEBUG)
+      $sformatf("NONPOSTED DTI: stream=%0d group=%0d expected=%0d",
+        l_stream, l_np_group, m_qos_expected_count[l_np_group]), UVM_MEDIUM)
   end
 `endif
 
