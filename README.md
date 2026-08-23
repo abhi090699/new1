@@ -41,6 +41,18 @@ Sequence:
 
 Monitor `build_phase` init: `LBB_NUM_TLP_STREAMS * 2` (was `* 4`).
 
+## If monitor is already patched and you still see
+
+```
+QOS_MIDTEST_ERR group=8 stream=0 tlp_type=1 observed = expected+1
+tdata=0x002001
+```
+
+The monitor map is doing the right thing. That extra NP stream-0 beat is **not** a group-index bug.
+
+1. Confirm `cdn_pcie_hls_bridge_qos_stream_seq::body()` does **not** fork `send_compl_qos`. Completions are `tlp_type=1`, `stream=port`; port 0 looks identical to this tdata. If you removed completion expected counts but still drive completion QoS, you get exactly `observed = expected+1`.
+2. If there is DTI NP traffic, copy `rtl/hls_bridge_qos_dti_pck_enc.sv` over the DUT encoder. The global spill slot plus `spilled_pck_stream_id = 3'b000` in the for-loop pulses a phantom NP stream-0 enable. The monitor cannot predict that.
+
 ## HAL expected-count snippets
 
 Posted MSI (`ROUTE_TO_MSI`):
