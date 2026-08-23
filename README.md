@@ -27,7 +27,23 @@ Copy these over the TB sources of the same name. Do not patch the DUT DTI encode
 | Completions | delete the `HLSB_QOS_SUPP` block |
 | DTI Posted / NonPosted | **delete** `m_qos_expected_count++` and do **not** write `qos_ap` |
 
-Sequence: `{stream, tlp_type, count}` at `[16:0]`. Do not fork `send_compl_qos`.
+Sequence: build a 24-bit `l_tdata` with those fields, then copy bytes:
+
+```systemverilog
+l_tdata = '0;
+l_tdata[12:0]  = count;
+l_tdata[13]    = tlp_type;
+l_tdata[16:14] = stream;
+PacketData[2] == l_tdata[23:16];
+PacketData[1] == l_tdata[15:8];
+PacketData[0] == l_tdata[7:0];
+```
+
+Do not use `l_tdata = {stream, tlp_type, count}` with the old `PacketData[1][0] == l_tdata[17]` constraints. That is this error:
+
+`QOS_MIDTEST_ERR group=15 stream=3 tlp_type=1 qos_type=1 observed=0x1 > expected=0x0`
+
+Old layout NP RESP stream 3 is `{[17:15]=3,[14]=1,[13]=1}`. New decode uses `[16:14]`, which becomes `7`, group `S+7=15`. Also delete DTI `m_qos_expected_count++` and delete `QOS_MIDTEST_ERR` (raise expected to observed). Do not fork `send_compl_qos`.
 
 ## Why DTI is not predicted
 

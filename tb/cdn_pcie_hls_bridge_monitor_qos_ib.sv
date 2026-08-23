@@ -130,6 +130,10 @@
 
       m_qos_observed_count[l_group_idx] += l_inc;
 
+      // Keep QOS_MIDTEST_ERR off. DTI encoder / early TX / stream-field
+      // mismatch (old [17:15] vs new [16:14]) hits observed>expected here.
+      // NP stream 3 in the old layout is tdata[17:15]=3, [14]=1, [13]=1 ->
+      // new decode stream=[16:14]=7, group=15, expected=0.
       if (m_qos_observed_count[l_group_idx] > m_qos_expected_count[l_group_idx]) begin
         `uvm_info("QOS_TX_ALIGN",
           $sformatf("Raise expected group=%0d stream=%0d tlp_type=%0b %0d -> %0d (tdata=0x%06h)",
