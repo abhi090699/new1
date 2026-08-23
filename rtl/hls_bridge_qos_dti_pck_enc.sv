@@ -122,14 +122,16 @@ module hls_bridge_qos_dti_pck_enc #(
                            gen_unpack_cntl)
   endgenerate
 
-  // Extract stream ID from per-slot unpacked metadata LSBs.
-  // Do not slice [METADATA_STREAM_ID_OFFSET +: 3] — HLS_METADATA_WD is 10, so
-  // bit 48 is out of range and always reads as 0 (phantom stream 0).
+  // 10-bit DTI metadata packing (same order as MSI IB sideband):
+  //   [2:0] VC
+  //   [5:3] stream / idgroup
+  // Using [2:0] as stream made a VC=1 NP DTI TLP look like stream 1
+  // (QOS_EXP_DTI stream=0 group=8 vs QOS_TX stream=1 group=9).
   generate
     for (gv_x = 0; gv_x < KMAX_NUM_TLPS_PER_CLK; gv_x = gv_x + 1) begin
       always @(*) begin : process_cntl_metadata
         if (hls_rx_dti_valid)
-          cntl_metadata_stream_id[gv_x] = cntl_metadata[gv_x][0 +: METADATA_STREAM_ID_WD];
+          cntl_metadata_stream_id[gv_x] = cntl_metadata[gv_x][3 +: METADATA_STREAM_ID_WD];
         else
           cntl_metadata_stream_id[gv_x] = {METADATA_STREAM_ID_WD{1'b0}};
       end
