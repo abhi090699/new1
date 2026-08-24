@@ -16,7 +16,9 @@ Copy these over the TB sources of the same name. Do not patch the DUT DTI encode
 | `[16:14]` | stream |
 | `[23:17]` | unused |
 
-`group = tlp_type * S + stream`. Maps sized `LBB_NUM_TLP_STREAMS * 2`.
+`group = tlp_type * S + stream`. Maps sized `LBB_NUM_TLP_STREAMS * 2`. Spec TX/RX tdata is the same (`[14+:3]` stream).
+
+DTI encoder (spec): count on SOP&EOP same cycle; SOP-without-EOP is a spill counted later on slot `K`. `METADATA_STREAM_ID_OFFSET=48` with `HLS_METADATA_WD=10` forces spill stream to 0. That is the extra Posted stream-0 QoS TX vs HAL DTI `idgroup`.
 
 ## HAL expected counts
 

@@ -1,12 +1,13 @@
 //----------------------------------------------------------------------------
 // IB QoS pieces for class cdn_pcie_hls_bridge_monitor
-// Paste qos_group_idx into the class, replace process_tlp_qos_tx, and
-// swap the HLSB_QOS_SUPP expected-count blocks as shown below.
+// Matches hls_bridge_qos spec: COUNT[12:0], TLP_TYPE[13], TLP_STREAM[14+:3].
+// Groups: P slots 0..S-1, NP slots S..2S-1. S = LBB_NUM_TLP_STREAMS (8).
 //
-// DTI: delete the HAL expected increment (do not write qos_ap either).
-// The DUT encoder is not 1:1 with HAL idgroup. process_tlp_qos_tx raises
-// expected up to observed so encoder extras / other stream IDs / TX-before-
-// HAL do not fire QOS_MIDTEST_ERR. AXI and MSI still increment expected.
+// AXI: qos_ap + expected++. MSI: no qos_ap, expected++ Posted only.
+// DTI: no qos_ap, no expected++. Spec encoder counts SOP&EOP same cycle,
+// and spilled SOP-without-EOP on slot K. METADATA_STREAM_ID_OFFSET=48 with
+// HLS_METADATA_WD=10 makes the spill slot stream always 0. That is the extra
+// Posted stream-0 beat (group 0) vs HAL DTI idgroup (e.g. stream 6).
 //----------------------------------------------------------------------------
 
   function int unsigned qos_group_idx(bit tlp_type, bit [2:0] stream);
@@ -33,10 +34,9 @@
 `endif
 
   // DTI (`ifdef HLSB_QOS_SUPP` inside ROUTE_TO_DTI):
-  // DELETE m_qos_expected_count++ and do not write qos_ap. Your diff still
-  // increments P group for DTI; that expected lands on idgroup while DUT TX
-  // stream is [16:14] (or the encoder), so another group gets observed=1
-  // expected=0 (group=15).
+  // DELETE expected++. No qos_ap (encoder drives dti_en, not AXI RX).
+  // Same-cycle SOP&EOP uses slot metadata; spill uses slot K and offset-48
+  // stream=0. HAL idgroup then does not match DUT TX.
 `ifdef HLSB_QOS_SUPP
   if (parameters_cfg_pkg::LBB_SUPPORT) begin
     `uvm_info("QOS_EXP_DTI",
