@@ -32,8 +32,10 @@
 `endif
 
   // DTI (`ifdef HLSB_QOS_SUPP` inside ROUTE_TO_DTI):
-  // DELETE the old block that did m_qos_expected_count++ (and do not write qos_ap).
-  // Leave this empty, or log only:
+  // DELETE m_qos_expected_count++ and do not write qos_ap. Your diff still
+  // increments P group for DTI; that expected lands on idgroup while DUT TX
+  // stream is [16:14] (or the encoder), so another group gets observed=1
+  // expected=0 (group=15).
 `ifdef HLSB_QOS_SUPP
   if (parameters_cfg_pkg::LBB_SUPPORT) begin
     `uvm_info("QOS_EXP_DTI",
@@ -88,26 +90,27 @@
   // error if it is still in the file:
   //   QOS_TX_NEVER_FIRED group=8 expected=0x805 DUT TX never fired
 
-  //----- check_phase QoS loop (around QOS_TX_NEVER_FIRED) -------------------
-  // Replace the loop that does:
-  //   if (expected != 0 && observed == 0) QOS_TX_NEVER_FIRED
-  // Groups with observed==0 are leftover completion/DTI expected. Skip them.
-  // Only compare groups the DUT actually reported.
+  //----- check_phase QoS loop ----------------------------------------------
+  // Only fail observed < expected (missing AXI/MSI). Do not QOS_TX_NEVER_FIRED
+  // and do not fail observed > expected (DTI encoder extras).
   //
   // for (int g = 0; g < (parameters_cfg_pkg::LBB_NUM_TLP_STREAMS * 2); g++) begin
-  //   if (m_qos_observed_count[g] == 0)
-  //     continue;
-  //   if (m_qos_observed_count[g] != m_qos_expected_count[g])
+  //   if (m_qos_observed_count[g] < m_qos_expected_count[g])
   //     `uvm_error({msg_id, "[QOS_MISMATCH]"},
-  //       $sformatf("group=%0d observed=0x%0h expected=0x%0h",
+  //       $sformatf("group=%0d observed=0x%0h < expected=0x%0h",
   //         g, m_qos_observed_count[g], m_qos_expected_count[g]))
   // end
 
   //----- process_tlp_qos_tx -------------------------------------------------
-  // No QOS_MIDTEST_ERR. If DUT (DTI encoder, early TX) is ahead of AXI/MSI
-  // expected, raise expected to observed so a later observed!=expected check
-  // still passes. Missing AXI/MSI credits (observed < expected) still fail
-  // that end-of-test check.
+  // MONITOR-ONLY (encoder RTL left alone). Three things this task must do:
+  //   1. Decode tdata into the 2-group index.
+  //   2. Never QOS_MIDTEST_ERR.
+  //   3. If observed > expected, expected = observed (DTI / extra beats).
+  //
+  // Decode: if QOS_MIDTEST_ERR still prints qos_type=1 and group=15 for
+  // stream=3, DUT TX is still the OLD layout. Use the alt decode below
+  // (tlp_type=[14], stream=[17:15], ignore qos_type) so NP stream 3 ->
+  // group S+3, not S+7.
   virtual task process_tlp_qos_tx(string msg_id = "");
     denaliStreamTransaction l_stream_trans;
     bit [23:0]              l_count_data;
@@ -123,8 +126,12 @@
       l_count_data[15:8]  = l_stream_trans.PacketData[1][7:0];
       l_count_data[7:0]   = l_stream_trans.PacketData[0][7:0];
 
+      // New DUT TX: [13]=tlp_type [16:14]=stream
       l_tlp_type  = l_count_data[13];
       l_stream    = l_count_data[16:14];
+      // Alt — DUT TX still old: [14]=tlp_type [17:15]=stream, ignore qos_type[13]
+      // l_tlp_type = l_count_data[14];
+      // l_stream   = l_count_data[17:15];
       l_group_idx = qos_group_idx(l_tlp_type, l_stream);
       l_inc       = int'(l_count_data[12:0]);
 

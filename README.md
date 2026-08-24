@@ -53,6 +53,20 @@ The DUT encoder does not match HAL `idgroup` (stream field, extra SOP/EOP, TX be
 
 If logs still show `QOS_EXP_DTI ... expected=N`, the old DTI increment is still in the monitor — remove it.
 
+## Monitor-only options if encoder RTL is left alone
+
+Do not predict DTI from HAL. Pick one TX decode, absorb extras, only check AXI/MSI undercount.
+
+| Fix | When to use |
+|-----|-------------|
+| 1. Delete DTI `expected++`, no `qos_ap` | Encoder stream/beats ≠ HAL `idgroup` |
+| 2. Delete `QOS_MIDTEST_ERR`; `expected = observed` on overage | Encoder extras or TX before HAL ended |
+| 3. `check_phase`: fail only `observed < expected` | Leftover completion/DTI expected (`QOS_TX_NEVER_FIRED group=8`) |
+| 4. Alt TX decode: `tlp_type=[14]`, `stream=[17:15]`, ignore `qos_type` | DUT TX still old 18-bit layout (`group=15` for NP stream 3) |
+| 5. Do **not** `qos_ap.write` for DTI | That doubles DUT count (AXI slave + encoder) |
+
+Do not fork `send_compl_qos`. Completions have no DUT group.
+
 ## `QOS_TX_NEVER_FIRED group=8 expected=0x805`
 
 Group 8 is NP stream 0 (`S+0`). `check_phase` fires this when `expected != 0` and the DUT never sent QoS TX for that group.
