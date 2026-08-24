@@ -20,12 +20,12 @@ Copy these over the TB sources of the same name. Do not patch the DUT DTI encode
 
 ## HAL expected counts
 
-| Path | Action |
-|------|--------|
-| AXI Posted / NonPosted | write `qos_ap`, increment `qos_group_idx` |
-| MSI Posted | increment Posted group only |
-| Completions | delete the `HLSB_QOS_SUPP` block |
-| DTI Posted / NonPosted | **delete** `m_qos_expected_count++` and do **not** write `qos_ap` |
+| Path | `qos_ap` | `expected++` |
+|------|----------|----------------|
+| AXI Posted / NonPosted | write | yes, `type*S+idgroup` |
+| MSI Posted | **none** | yes, Posted `stream` only |
+| DTI Posted / NonPosted | **none** | **no** (encoder ≠ HAL) |
+| Completions | **none** | **no** |
 
 Sequence: build a 24-bit `l_tdata` with those fields, then copy bytes:
 

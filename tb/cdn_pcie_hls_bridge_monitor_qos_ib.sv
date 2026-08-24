@@ -21,12 +21,13 @@
 
   //----- process_hls_ib_posted_hal_pkt_ended --------------------------------
   // MSI (`ifdef HLSB_QOS_SUPP` inside ROUTE_TO_MSI):
+  // No qos_ap. DUT counts MSI internally. Only increment expected.
 `ifdef HLSB_QOS_SUPP
   if (parameters_cfg_pkg::LBB_SUPPORT) begin
     int l_p_group = qos_group_idx(1'b0, 3'(l_stream));
     m_qos_expected_count[l_p_group]++;
     `uvm_info("QOS_EXP_MSI",
-      $sformatf("MSI Posted -> group=%0d stream=%0d expected=%0d",
+      $sformatf("MSI -> P group=%0d stream=%0d expected=%0d",
         l_p_group, l_stream, m_qos_expected_count[l_p_group]), UVM_MEDIUM)
   end
 `endif
