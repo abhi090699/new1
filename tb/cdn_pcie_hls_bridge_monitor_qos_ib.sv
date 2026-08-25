@@ -33,10 +33,16 @@
   end
 `endif
 
-  // DTI (`ifdef HLSB_QOS_SUPP` inside ROUTE_TO_DTI):
-  // DELETE expected++. No qos_ap (encoder drives dti_en, not AXI RX).
-  // Same-cycle SOP&EOP uses slot metadata; spill uses slot K and offset-48
-  // stream=0. HAL idgroup then does not match DUT TX.
+  // Posted DTI — keep uvm_info, DELETE expected++ (your wc still has it):
+  //   m_qos_expected_count[l_group]++;   // REMOVE
+
+  // NP DTI — DELETE:
+  //   m_qos_expected_count[l_group]++;   // REMOVE
+
+  // process_tlp_qos_tx — your wc still uvm_error. Replace with:
+  //   m_qos_observed_count[l_group_idx] += int'(l_count_data[12:0]);
+  //   if (m_qos_observed_count[l_group_idx] > m_qos_expected_count[l_group_idx])
+  //     m_qos_expected_count[l_group_idx] = m_qos_observed_count[l_group_idx];
 `ifdef HLSB_QOS_SUPP
   if (parameters_cfg_pkg::LBB_SUPPORT) begin
     `uvm_info("QOS_EXP_DTI",
